@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Exam Score Prediction</title>
+</head>
+<body>
+    <h1>Exam Score Prediction</h1>
+
+    <form method="POST">
+        <label>Study hours:</label>
+        <input type="number" step="any" name="study_hours" required>
+        <button type="submit">Predict</button>
+    </form>
+
+    {% if study_hours is not none and exam_score is not none %}
+        <p>Input study hour is: <strong>{{ study_hours }}</strong></p>
+        <p>Output exam score is: <strong>{{ exam_score }}</strong></p>
+    {% endif %}
+
+    {% if error %}
+        <p>{{ error }}</p>
+    {% endif %}
+</body>
+</html>
