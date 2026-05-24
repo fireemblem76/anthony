@@ -1,6 +1,3 @@
 flask
-flask-cors
+pandas
 gunicorn
-pandas         # if you use it
-scikit-learn   # if you use it
-numpy          # if you use it
