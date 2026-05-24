@@ -9,7 +9,7 @@ def run_forecast(df: pd.DataFrame, existing_df: pd.DataFrame = None) -> pd.DataF
     """
 
     # Convert dates
-    
+
     df["Date"] = pd.to_datetime(df["Date"])
 
     # Drop rows with missing Product_ID
@@ -120,13 +120,13 @@ def predict_sales(data: dict) -> list:
 
     df = df.rename(columns={
 
-    "Title": "Product_ID",
-    "field_1": "Date",
-    "field_3": "Lead_Days",
-    "field_4": "Sales",
-    "field_6": "Inventory_Start"
+        "Title": "Product_ID",
+        "field_1": "Date",
+        "field_3": "Lead_Days",
+        "field_4": "Sales",
+        "field_6": "Inventory_Start"
 
-
+    })
     # Load existing forecast if it exists (optional — remove if deploying stateless)
     existing_df = None
     if os.path.exists("forecast_output.csv"):
