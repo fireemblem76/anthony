@@ -1,0 +1,6 @@
+flask
+flask-cors
+gunicorn
+pandas         # if you use it
+scikit-learn   # if you use it
+numpy          # if you use it
