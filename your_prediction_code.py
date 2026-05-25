@@ -12,6 +12,39 @@ def run_forecast(df: pd.DataFrame, existing_df: pd.DataFrame = None) -> pd.DataF
 
     df["Date"] = pd.to_datetime(df["Date"])
 
+# =========================
+# CREATE MONTHLY SUMMARY
+# =========================
+
+df["Year"] = df["Date"].dt.year
+df["Month"] = df["Date"].dt.month
+
+monthly_summary = (
+    df.groupby(["Year", "Month", "Product_ID"])
+    .agg({
+        "Sales": "sum",
+        "Inventory_Start": "last",
+        "Lead_Days": "last"
+    })
+    .reset_index()
+)
+
+# Rename grouped sales
+monthly_summary = monthly_summary.rename(
+    columns={"Sales": "Monthly_Sales"}
+)
+
+# Average monthly sales per product
+avg_sales_per_product = (
+    monthly_summary.groupby("Product_ID")["Monthly_Sales"]
+    .mean()
+    .reset_index()
+)
+
+avg_sales_per_product = avg_sales_per_product.rename(
+    columns={"Monthly_Sales": "Avg_Monthly_Sales"}
+)
+
     # Drop rows with missing Product_ID
     df = df.dropna(subset=["Product_ID"])
     df["Product_ID"] = df["Product_ID"].astype(str).str.strip()
@@ -57,10 +90,20 @@ def run_forecast(df: pd.DataFrame, existing_df: pd.DataFrame = None) -> pd.DataF
 
     # Loop products and build results
     results = []
-    for product in df["Product_ID"].unique():
-        product_df = df[df["Product_ID"] == product]
 
-        avg_daily_sales = product_df["Sales"].mean()
+for product in monthly_summary["Product_ID"].unique():
+
+    product_df = monthly_summary[
+        monthly_summary["Product_ID"] == product
+    ]
+
+    avg_monthly_sales = (
+        avg_sales_per_product[
+            avg_sales_per_product["Product_ID"] == product
+        ]["Avg_Monthly_Sales"].iloc[0]
+    )
+
+
         current_inventory = product_df["Inventory_Start"].iloc[-1]
         lead_days = int(product_df["Lead_Days"].iloc[-1])
 
@@ -69,7 +112,8 @@ def run_forecast(df: pd.DataFrame, existing_df: pd.DataFrame = None) -> pd.DataF
 
         safety_stock = 150 if restock_order_date.month in [1, 4, 6, 12] else 100
 
-        adjusted_demand = avg_daily_sales
+        adjusted_demand = avg_monthly_sales
+
         if product_df["Weekend"].iloc[-1] == "Yes":
             adjusted_demand *= 1.20
         if product_df["Public_holiday"].iloc[-1] == "Yes":
@@ -88,13 +132,13 @@ def run_forecast(df: pd.DataFrame, existing_df: pd.DataFrame = None) -> pd.DataF
 
         results.append({
             "Product_ID": product,
-            "Avg_Daily_Sales": round(avg_daily_sales, 2),
+            "Avg_Monthly_Sales": round(avg_monthly_sales, 2),
             "Adjusted_Demand": round(adjusted_demand, 2),
             "Lead_Days": lead_days,
             "Safety_Stock": safety_stock,
             "Current_Inventory": current_inventory,
             "Reorder_Point": round(reorder_point, 2),
-            "Product_Arrival_Key": f"{product}_{restock_arrival_date.strftime('%d/%m/%Y')}",
+            "Product_Arrival_Key": f"{product}_{restock_arrival_date.strftime('%Y%m%d')}"
             "Suggested_Restock": suggested_restock,
             "Restock_Status": restock_status,
             "Restock_Order_Date": restock_order_date.strftime('%d/%m/%Y'),
