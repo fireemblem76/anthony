@@ -2,194 +2,179 @@ import pandas as pd
 from datetime import date
 import os
 
-def run_forecast(df: pd.DataFrame, existing_df: pd.DataFrame = None) -> pd.DataFrame:
-    """
-    Core forecast logic. Accepts dataframes instead of reading from disk.
-    Returns a DataFrame of results.
-    """
+# Read CSV
+df = pd.read_csv("TrainingNewSales.csv")
 
-    # Convert dates
+# Convert dates
+df["Date"] = pd.to_datetime(df["Date"], dayfirst=True)
 
-    df["Date"] = pd.to_datetime(df["Date"])
+# Drop rows with missing Product_ID to avoid empty groups
+df = df.dropna(subset=["Product_ID"])
+df["Product_ID"] = df["Product_ID"].astype(str).str.strip()
 
-# =========================
-# CREATE MONTHLY SUMMARY
-# =========================
+# --- FIX: Add missing columns or ensure they exist ---
+# The original error was due to 'Weekend', 'Public_holiday', 'Promotion_Period' being missing.
+# For now, I will add dummy columns with 'No' to allow execution.
+# In a real scenario, these would be properly derived from the 'Date' or other features.
+if 'Weekend' not in df.columns:
+    df['Weekend'] = 'No'
+if 'Public_holiday' not in df.columns:
+    df['Public_holiday'] = 'No'
+if 'Promotion_Period' not in df.columns:
+    df['Promotion_Period'] = 'No'
+# --- End FIX ---
 
-df["Year"] = df["Date"].dt.year
-df["Month"] = df["Date"].dt.month
+# Determine base Restock_Order_Date from existing forecast (max + 1 day)
+output_file = "forecast_output.csv"
 
-monthly_summary = (
-    df.groupby(["Year", "Month", "Product_ID"])
-    .agg({
-        "Sales": "sum",
-        "Inventory_Start": "last",
-        "Lead_Days": "last"
-    })
-    .reset_index()
-)
+# --- New logic to get last known restock arrival dates for 'RESTOCK NEEDED' items ---
+product_to_max_arrival_date = {}
+if os.path.exists(output_file):
+    try:
+        existing_df_from_file = pd.read_csv(output_file)
+        # Convert date columns for comparison
+        existing_df_from_file['Restock_Order_Date'] = pd.to_datetime(existing_df_from_file['Restock_Order_Date'], dayfirst=True, errors='coerce')
+        existing_df_from_file['Restock_Arrival_Date'] = pd.to_datetime(existing_df_from_file['Restock_Arrival_Date'], dayfirst=True, errors='coerce')
 
-# Rename grouped sales
-monthly_summary = monthly_summary.rename(
-    columns={"Sales": "Monthly_Sales"}
-)
+        # Filter for 'RESTOCK NEEDED' status and valid arrival dates
+        needed_restocks = existing_df_from_file[
+            (existing_df_from_file['Restock_Status'] == 'RESTOCK NEEDED') &
+            (existing_df_from_file['Restock_Arrival_Date'].notna())
+        ]
 
-# Average monthly sales per product
-avg_sales_per_product = (
-    monthly_summary.groupby("Product_ID")["Monthly_Sales"]
-    .mean()
-    .reset_index()
-)
+        # Get the max arrival date for each product that still needs restock
+        if not needed_restocks.empty:
+            product_to_max_arrival_date = needed_restocks.groupby('Product_ID')['Restock_Arrival_Date'].max().to_dict()
 
-avg_sales_per_product = avg_sales_per_product.rename(
-    columns={"Monthly_Sales": "Avg_Monthly_Sales"}
-)
-
-    # Drop rows with missing Product_ID
-    df = df.dropna(subset=["Product_ID"])
-    df["Product_ID"] = df["Product_ID"].astype(str).str.strip()
-
-    # Add missing columns if not present
-    if 'Weekend' not in df.columns:
-        df['Weekend'] = 'No'
-    if 'Public_holiday' not in df.columns:
-        df['Public_holiday'] = 'No'
-    if 'Promotion_Period' not in df.columns:
-        df['Promotion_Period'] = 'No'
-
-    # Determine base_order_date and product_to_max_arrival_date
-    product_to_max_arrival_date = {}
-    base_order_date = pd.Timestamp(date.today())
-
-    if existing_df is not None and not existing_df.empty:
-        try:
-            existing_df['Restock_Order_Date'] = pd.to_datetime(
-                existing_df['Restock_Order_Date'], dayfirst=True, errors='coerce'
-            )
-            existing_df['Restock_Arrival_Date'] = pd.to_datetime(
-                existing_df['Restock_Arrival_Date'], dayfirst=True, errors='coerce'
-            )
-
-            needed_restocks = existing_df[
-                (existing_df['Restock_Status'] == 'RESTOCK NEEDED') &
-                (existing_df['Restock_Arrival_Date'].notna())
-            ]
-
-            if not needed_restocks.empty:
-                product_to_max_arrival_date = (
-                    needed_restocks.groupby('Product_ID')['Restock_Arrival_Date']
-                    .max().to_dict()
-                )
-
-            max_order = existing_df["Restock_Order_Date"].max()
-            if not pd.isna(max_order):
-                base_order_date = max_order + pd.Timedelta(days=1)
-
-        except Exception:
+        # Existing logic for base_order_date
+        max_order = existing_df_from_file.get("Restock_Order_Date").max()
+        if pd.isna(max_order):
             base_order_date = pd.Timestamp(date.today())
+        else:
+            base_order_date = max_order + pd.Timedelta(days=1)
+    except Exception:
+        base_order_date = pd.Timestamp(date.today())
+else:
+    base_order_date = pd.Timestamp(date.today())
+# --- End of new logic ---
 
-    # Loop products and build results
-    results = []
+# Store results
+results = []
 
-for product in monthly_summary["Product_ID"].unique():
+# Loop products
+for product in df["Product_ID"].unique():
 
-    product_df = monthly_summary[
-        monthly_summary["Product_ID"] == product
-    ]
+    # Product data
+    product_df = df[df["Product_ID"] == product]
 
-    avg_monthly_sales = (
-        avg_sales_per_product[
-            avg_sales_per_product["Product_ID"] == product
-        ]["Avg_Monthly_Sales"].iloc[0]
+    # Average daily sales
+    avg_daily_sales = product_df["Sales"].mean()
+
+    # Current inventory
+    current_inventory = product_df["Inventory_Start"].iloc[-1]
+
+    # Lead days
+    lead_days = int(product_df["Lead_Days"].iloc[-1])
+
+    # Use base_order_date (max existing Restock_Order_Date + 1) for the new order
+    restock_order_date = base_order_date
+
+    # Calculate restock arrival date = order date + lead_days
+    restock_arrival_date = restock_order_date + pd.Timedelta(days=lead_days)
+
+    # Safety stock depends on the month of the restock order date
+    if restock_order_date.month in [1, 4, 6, 12]:
+        safety_stock = 150
+    else:
+        safety_stock = 100
+
+    # Base adjusted demand
+    adjusted_demand = avg_daily_sales
+
+    # Weekend effect
+    if product_df["Weekend"].iloc[-1] == "Yes":
+        adjusted_demand *= 1.20
+
+    # Public holiday effect
+    if product_df["Public_holiday"].iloc[-1] == "Yes":
+        adjusted_demand *= 1.30
+
+    # Promotion effect
+    if product_df["Promotion_Period"].iloc[-1] == "Yes":
+        adjusted_demand *= 1.50
+
+    # Reorder point
+    reorder_point = (adjusted_demand * lead_days) + safety_stock
+
+    # Restock logic
+    if current_inventory <= reorder_point:
+        restock_status = "RESTOCK NEEDED"
+    else:
+        restock_status = "SUFFICIENT"
+
+    # Suggested restock amount (initial calculation)
+    suggested_restock = max(
+        0,
+        round(reorder_point - current_inventory)
     )
 
-
-        current_inventory = product_df["Inventory_Start"].iloc[-1]
-        lead_days = int(product_df["Lead_Days"].iloc[-1])
-
-        restock_order_date = base_order_date
-        restock_arrival_date = restock_order_date + pd.Timedelta(days=lead_days)
-
-        safety_stock = 150 if restock_order_date.month in [1, 4, 6, 12] else 100
-
-        adjusted_demand = avg_monthly_sales
-
-        if product_df["Weekend"].iloc[-1] == "Yes":
-            adjusted_demand *= 1.20
-        if product_df["Public_holiday"].iloc[-1] == "Yes":
-            adjusted_demand *= 1.30
-        if product_df["Promotion_Period"].iloc[-1] == "Yes":
-            adjusted_demand *= 1.50
-
-        reorder_point = (adjusted_demand * lead_days) + safety_stock
-        restock_status = "RESTOCK NEEDED" if current_inventory <= reorder_point else "SUFFICIENT"
-        suggested_restock = max(0, round(reorder_point - current_inventory))
-
-        if restock_status == "RESTOCK NEEDED" and product in product_to_max_arrival_date:
-            if restock_order_date < product_to_max_arrival_date[product]:
-                suggested_restock = 0
-                restock_status = "ORDER IN TRANSIT"
-
-        results.append({
-            "Product_ID": product,
-            "Avg_Monthly_Sales": round(avg_monthly_sales, 2),
-            "Adjusted_Demand": round(adjusted_demand, 2),
-            "Lead_Days": lead_days,
-            "Safety_Stock": safety_stock,
-            "Current_Inventory": current_inventory,
-            "Reorder_Point": round(reorder_point, 2),
-            "Product_Arrival_Key": f"{product}_{restock_arrival_date.strftime('%Y%m%d')}"
-            "Suggested_Restock": suggested_restock,
-            "Restock_Status": restock_status,
-            "Restock_Order_Date": restock_order_date.strftime('%d/%m/%Y'),
-            "Restock_Arrival_Date": restock_arrival_date.strftime('%d/%m/%Y')
-        })
-
-    return pd.DataFrame(results)
+    # --- Apply new logic to prevent duplicate reorders if previous order is in transit ---
+    if restock_status == "RESTOCK NEEDED" and product in product_to_max_arrival_date:
+        last_known_arrival_date = product_to_max_arrival_date[product]
+        # If the current restock order date is before the last known arrival date of a previous 'RESTOCK NEEDED' order,
+        # it means a restock for this product is already in transit and will cover the need.
+        if restock_order_date < last_known_arrival_date:
+            suggested_restock = 0 # Set suggested restock to zero
+            restock_status = "ORDER IN TRANSIT" # Update status for clarity
+    # --- End of new logic ---
 
 
-def predict_sales(data: dict) -> list:
-    """
-    Flask endpoint function.
-    Accepts: { "records": [ {Product_ID, Date, Sales, Inventory_Start, Lead_Days, ...} ] }
-    Returns: list of forecast dicts
-    """
-    records = data.get("records", [])
-    if not records:
-        raise ValueError("No records provided in payload")
-
-    df = pd.DataFrame(records)
-
-    # Rename SharePoint columns
-
-    df = df.rename(columns={
-
-        "Title": "Product_ID",
-        "field_1": "Date",
-        "field_3": "Lead_Days",
-        "field_4": "Sales",
-        "field_6": "Inventory_Start"
-
+    # Save results
+    results.append({
+        "Product_ID": product,
+        "Avg_Daily_Sales": round(avg_daily_sales, 2),
+        "Adjusted_Demand": round(adjusted_demand, 2),
+        "Lead_Days": lead_days,
+        "Safety_Stock": safety_stock,
+        "Current_Inventory": current_inventory,
+        "Reorder_Point": round(reorder_point, 2),
+        "Product_Arrival_Key": f"{product}_{restock_arrival_date.strftime('%d/%m/%Y')}",
+        "Suggested_Restock": suggested_restock,
+        "Restock_Status": restock_status,
+        "Restock_Order_Date": restock_order_date.strftime('%d/%m/%Y'),
+        "Restock_Arrival_Date": restock_arrival_date.strftime('%d/%m/%Y')
     })
-    # Load existing forecast if it exists (optional — remove if deploying stateless)
-    existing_df = None
-    if os.path.exists("forecast_output.csv"):
-        existing_df = pd.read_csv("forecast_output.csv")
 
-    result_df = run_forecast(df, existing_df)
+# Create dataframe from new results
+new_results_df = pd.DataFrame(results)
 
-    # Convert to plain Python types for JSON serialisation
-    return result_df.to_dict(orient="records")
+# Check if forecast_output.csv already exists
+# This part handles combining the new results with the existing file.
+# The logic for preventing duplicate orders was applied *before* generating new_results_df.
+output_file = "forecast_output.csv"
+if os.path.exists(output_file):
+    # Load existing data
+    existing_df = pd.read_csv(output_file)
+    # Concatenate new results with existing data
+    combined_df = pd.concat([existing_df, new_results_df], ignore_index=True)
+else:
+    # If file doesn't exist, new_results_df is the first set of results
+    combined_df = new_results_df
 
+# --- New logic to ensure consistent date format for output ---
+# Convert date columns to datetime objects (handling potential mixed types) then format to 'dd/mm/yyyy'
+for col in ['Restock_Order_Date', 'Restock_Arrival_Date']:
+    if col in combined_df.columns:
+        # First, ensure they are datetime objects, coercing errors for robustness
+        combined_df[col] = pd.to_datetime(combined_df[col], dayfirst=True, errors='coerce')
+        # Then format them to the desired string format, handling NaT values
+        combined_df[col] = combined_df[col].dt.strftime('%d/%m/%Y').fillna('')
+# --- End of new logic ---
 
-def calculate_restock(data: dict) -> list:
-    """
-    Same logic — alias endpoint focused on restock output only.
-    Filters to only RESTOCK NEEDED / ORDER IN TRANSIT rows.
-    """
-    all_results = predict_sales(data)
-    restock_only = [
-        r for r in all_results
-        if r["Restock_Status"] in ("RESTOCK NEEDED", "ORDER IN TRANSIT")
-    ]
-    return restock_only
+# Print results
+print(combined_df)
+
+# Save output
+combined_df.to_csv(output_file, index=False)
+
+print("Forecast file created/updated")
